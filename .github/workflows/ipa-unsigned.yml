@@ -13,7 +13,7 @@ jobs:
         run: |
           xcodebuild archive \
             -project FreeTube/FreeTube.xcodeproj \
-            -target FreeTube \
+            -scheme FreeTube \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$PWD/build/FreeTube.xcarchive" \
