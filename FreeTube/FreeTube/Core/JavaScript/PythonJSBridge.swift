@@ -17,7 +17,7 @@ import PythonSupport
 ///    `_pypackage_source` finds this via `from yt_dlp.dependencies import yt_dlp_ejs` and
 ///    uses the JS content as its challenge-solver script source.
 /// 3. **`DenoJsRuntime._info` stub** — replaces the real binary-probe with a function that
-///    returns `JsRuntimeInfo(name='deno', path=..., version='2.0.0', version_tuple=(2,0,0),
+///    returns `JsRuntimeInfo(name='deno', path=..., version='2.0.0', version_tuple=(2,0,0),`
 ///    supported=True)`. Without this, yt-dlp's `_js_runtimes['deno'].info` would be `None`
 ///    (no deno binary on iOS) and the whole EJS path gets skipped.
 /// 4. **`subprocess.Popen` extension** — the YoutubeDL-iOS package already replaced
@@ -58,6 +58,8 @@ nonisolated enum PythonJSBridge {
         installEJSPackageShim()
         installRuntimeStub()
         installPopenExtension()
+        installDenoRunPatch()
+        runEvalProbe()
         log.info("PythonJSBridge installed (eval_js + yt_dlp_ejs shim + deno stub + Popen ext)")
     }
 
@@ -81,6 +83,7 @@ nonisolated enum PythonJSBridge {
             let wrapped = wrapForStdoutCapture(code)
             do {
                 let result = try JSEvaluator.evaluate(wrapped)
+                log.info("eval_js: input=\(code.count) chars output=\(result.count) chars")
                 return PythonObject(result)
             } catch {
                 let builtins = Python.import("builtins")
@@ -359,4 +362,36 @@ nonisolated enum PythonJSBridge {
         _Pop.wait = _patched_wait
         _Pop._freetube_patched = True
     """
+
+    private static func installDenoRunPatch() {
+        runSimpleString(denoRunPatchPython)
+        log.info("DenoJCP direct-run patch applied")
+    }
+
+    private static let denoRunPatchPython = """
+    try:
+        from yt_dlp.extractor.youtube.jsc._builtin.deno import DenoJCP
+        from yt_dlp.extractor.youtube.jsc.provider import JsChallengeProviderError
+        import builtins as _ft_builtins
+        if not getattr(DenoJCP, '_freetube_patched', False):
+            def _ft_run_deno(self, stdin, options):
+                try:
+                    return _ft_builtins.eval_js(stdin)
+                except Exception as _e:
+                    raise JsChallengeProviderError('freetube-jscore-shim: ' + str(_e))
+            DenoJCP._run_deno = _ft_run_deno
+            DenoJCP._freetube_patched = True
+    except Exception as _e:
+        import sys
+        print('PythonJSBridge: DenoJCP patch failed:', _e, file=sys.stderr)
+    """
+
+    private static func runEvalProbe() {
+        do {
+            let probe = try JSEvaluator.evaluate(wrapForStdoutCapture("console.log(JSON.stringify({ft_probe: 1}))"))
+            log.info("JSBridge eval probe result: \(probe, privacy: .public)")
+        } catch {
+            log.error("JSBridge eval probe failed: \(String(describing: error), privacy: .public)")
+        }
+    }
 }
