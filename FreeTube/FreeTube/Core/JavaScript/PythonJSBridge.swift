@@ -74,7 +74,7 @@ nonisolated enum PythonJSBridge {
     /// one inside the evaluation scope.
     private static func installEvalJSBuiltin() {
         let evalJS = PythonFunction { (args: PythonObject) -> PythonConvertible in
-            guard let code = String(args[0]) else {
+            guard let code = String(args) else {
                 let builtins = Python.import("builtins")
                 let err = builtins.TypeError("eval_js: first argument must be a string")
                 throw PythonError.exception(err, traceback: nil)
