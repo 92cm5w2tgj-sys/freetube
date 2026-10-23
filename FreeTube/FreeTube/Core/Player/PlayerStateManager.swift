@@ -374,36 +374,35 @@ final class PlayerStateManager {
         // Watch the manager's progress dictionary so the player UI can render a real-time progress
         // bar. Cancelled in `dismiss()` and replaced on each `load`.
         startProgressObservation(for: video.id)
-
-        // Three-tier playback resolution:
-        //   1. `ensureDownloaded` — yt-dlp into local file, then YouTubeKit progressive fallback
-        //      inside it. Returns a `file://` URL on success.
-        //   2. **HLS streaming** — last resort when every download path is blocked (PoT 403s,
-        //      cipher-decode broken, etc.). `AVPlayerItem(url:)` accepts an HLS master-playlist
-        //      URL identically to a file URL — AVFoundation handles segment fetching itself, so
-        //      we get playback without needing to predownload or decode signature ciphers. The
-        //      trade-off is no local file ⇒ the video isn't watchable offline, doesn't appear in
-        //      Downloads, and doesn't burn cache storage. But it plays.
+       }
+        // Playback resolution (stream-first):
+        //   1. **Streaming** — resolve an HLS/progressive URL and play it immediately
+        //      (`AVPlayerItem(url:)` accepts a remote URL identically to a file URL).
+        //      Trade-off: no local file, so the video isn't watchable offline and doesn't
+        //      appear in Downloads. But it plays right away.
+        //   2. `ensureDownloaded` — yt-dlp into local file, then YouTubeKit progressive
+        //      fallback inside it. Used only when no stream URL resolves. Returns a
+        //      `file://` URL on success.
+        loadState = .downloading(progress: 0, phase: nil)
         let playbackURL: URL
-        do {
-            loadState = .downloading(progress: 0, phase: nil)
+        if let streamURL = await resolveStreamingURL(videoID: video.id, quality: preferences.preferredQuality) {
+            log.info("resolveAndPlay: streaming \(streamURL.absoluteString, privacy: .public)")
+            playbackURL = streamURL
+        } else {
+            log.info("resolveAndPlay: no stream URL — falling back to download for \(video.id, privacy: .public)")
             // `.userInitiated` priority — the user just tapped Play and is actively waiting.
             // If a long background queue (playlist Download All) is in flight, this jumps the
             // line so playback starts as soon as the currently-running yt-dlp finishes, instead
             // of after every queued download.
-            playbackURL = try await DownloadManager.shared.ensureDownloaded(
-                video: video,
-                quality: preferences.preferredQuality,
-                priority: .userInitiated
-            )
-            log.info("resolveAndPlay: local file \(playbackURL.path, privacy: .public)")
-        } catch {
-            log.error("resolveAndPlay: download path FAILED for \(video.id, privacy: .public): \(String(describing: error), privacy: .public) — trying remote stream")
-            if let streamURL = await resolveStreamingURL(videoID: video.id, quality: preferences.preferredQuality) {
-                log.info("resolveAndPlay: streaming \(streamURL.absoluteString, privacy: .public)")
-                playbackURL = streamURL
-            } else {
-                log.error("resolveAndPlay: streaming fallback also unavailable for \(video.id, privacy: .public)")
+            do {
+                playbackURL = try await DownloadManager.shared.ensureDownloaded(
+                    video: video,
+                    quality: preferences.preferredQuality,
+                    priority: .userInitiated
+                )
+                log.info("resolveAndPlay: local file \(playbackURL.path, privacy: .public)")
+            } catch {
+                log.error("resolveAndPlay: download path FAILED for \(video.id, privacy: .public): \(String(describing: error), privacy: .public)")
                 loadState = .failed((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
                 stopProgressObservation()
                 return
@@ -585,8 +584,9 @@ final class PlayerStateManager {
         // The menu writes to `defaultRate`; KVO catches the write and we save it to prefs so the
         // next app launch starts at the same speed.
         defaultRateObservation = player.observe(\.defaultRate, options: [.new]) { [weak self] _, change in
-            guard let self else { return }
             guard let newValue = change.newValue else { return }
+            guard let self else { return }
+}
             let rate = Double(newValue)
             // Sanity: defaultRate of 0 would mean "paused on play()" which YouTube/AVPlayerViewController
             // never offers as a user option. Ignore any such bogus write.
