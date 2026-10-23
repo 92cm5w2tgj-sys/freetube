@@ -17,7 +17,7 @@ import PythonSupport
 ///    `_pypackage_source` finds this via `from yt_dlp.dependencies import yt_dlp_ejs` and
 ///    uses the JS content as its challenge-solver script source.
 /// 3. **`DenoJsRuntime._info` stub** — replaces the real binary-probe with a function that
-///    returns `JsRuntimeInfo(name='deno', path=..., version='2.0.0', version_tuple=(2,0,0),`
+///    returns `JsRuntimeInfo(name='deno', path=..., version='2.0.0', version_tuple=(2,0,0),
 ///    supported=True)`. Without this, yt-dlp's `_js_runtimes['deno'].info` would be `None`
 ///    (no deno binary on iOS) and the whole EJS path gets skipped.
 /// 4. **`subprocess.Popen` extension** — the YoutubeDL-iOS package already replaced
