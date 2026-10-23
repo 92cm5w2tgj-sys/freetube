@@ -1,0 +1,46 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-unsigned-ipa:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Archive without signing
+        run: |
+          xcodebuild archive \
+            -project FreeTube/FreeTube.xcodeproj \
+            -target FreeTube \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/FreeTube.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p Payload
+          cp -r "build/FreeTube.xcarchive/Products/Applications/FreeTube.app" Payload/
+          zip -r FreeTube-unsigned.ipa Payload
+          echo "--- sanity check: must be unsigned ---"
+          if [ -e "Payload/FreeTube.app/embedded.mobileprovision" ]; then
+            echo "ERROR: embedded.mobileprovision present, not unsigned"
+            exit 1
+          fi
+          if [ -e "Payload/FreeTube.app/_CodeSignature" ]; then
+            echo "ERROR: _CodeSignature present, not unsigned"
+            exit 1
+          fi
+          echo "OK: no embedded.mobileprovision, no _CodeSignature (unsigned)"
+          ls -lh FreeTube-unsigned.ipa
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreeTube-unsigned-IPA
+          path: FreeTube-unsigned.ipa
+          if-no-files-found: error
