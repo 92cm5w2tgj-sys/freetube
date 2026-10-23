@@ -586,7 +586,6 @@ final class PlayerStateManager {
         defaultRateObservation = player.observe(\.defaultRate, options: [.new]) { [weak self] _, change in
             guard let newValue = change.newValue else { return }
             guard let self else { return }
-}
             let rate = Double(newValue)
             // Sanity: defaultRate of 0 would mean "paused on play()" which YouTube/AVPlayerViewController
             // never offers as a user option. Ignore any such bogus write.
