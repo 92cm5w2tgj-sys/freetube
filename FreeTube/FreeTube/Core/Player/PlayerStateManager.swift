@@ -371,10 +371,10 @@ final class PlayerStateManager {
 
     private func resolveAndPlay(video: Video, autoplay: Bool, skipRecommendations: Bool = false) async {
         log.info("resolveAndPlay: start for \(video.id, privacy: .public)")
+        
         // Watch the manager's progress dictionary so the player UI can render a real-time progress
         // bar. Cancelled in `dismiss()` and replaced on each `load`.
         startProgressObservation(for: video.id)
-       }
         // Playback resolution (stream-first):
         //   1. **Streaming** — resolve an HLS/progressive URL and play it immediately
         //      (`AVPlayerItem(url:)` accepts a remote URL identically to a file URL).
