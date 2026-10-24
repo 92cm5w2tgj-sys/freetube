@@ -375,25 +375,32 @@ final class PlayerStateManager {
         // Watch the manager's progress dictionary so the player UI can render a real-time progress
         // bar. Cancelled in `dismiss()` and replaced on each `load`.
         startProgressObservation(for: video.id)
-        // Playback resolution (stream-first):
+                // Playback resolution (stream-first):
         //   1. **Streaming** — resolve an HLS/progressive URL and play it immediately
         //      (`AVPlayerItem(url:)` accepts a remote URL identically to a file URL).
         //      Trade-off: no local file, so the video isn't watchable offline and doesn't
         //      appear in Downloads. But it plays right away.
-        //   2. `ensureDownloaded` — yt-dlp into local file, then YouTubeKit progressive
-        //      fallback inside it. Used only when no stream URL resolves. Returns a
+        //   2. **Composite streaming** — most videos expose only separate video-only and
+        //      audio-only streams; stitch the best pair into an `AVMutableComposition` and
+        //      play that. Same no-local-file trade-off as tier 1.
+        //   3. `ensureDownloaded` — yt-dlp into local file, then YouTubeKit progressive
+        //      fallback inside it. Used only when no stream resolves. Returns a
         //      `file://` URL on success.
         loadState = .downloading(progress: 0, phase: nil)
-        let playbackURL: URL
+        let item: AVPlayerItem
         if let streamURL = await resolveStreamingURL(videoID: video.id, quality: preferences.preferredQuality) {
             log.info("resolveAndPlay: streaming \(streamURL.absoluteString, privacy: .public)")
-            playbackURL = streamURL
+            item = AVPlayerItem(url: streamURL)
+        } else if let compositeItem = await resolveCompositeItem(videoID: video.id, quality: preferences.preferredQuality) {
+            log.info("resolveAndPlay: composite stream for \(video.id, privacy: .public)")
+            item = compositeItem
         } else {
             log.info("resolveAndPlay: no stream URL — falling back to download for \(video.id, privacy: .public)")
             // `.userInitiated` priority — the user just tapped Play and is actively waiting.
             // If a long background queue (playlist Download All) is in flight, this jumps the
             // line so playback starts as soon as the currently-running yt-dlp finishes, instead
             // of after every queued download.
+            let playbackURL: URL
             do {
                 playbackURL = try await DownloadManager.shared.ensureDownloaded(
                     video: video,
@@ -407,8 +414,8 @@ final class PlayerStateManager {
                 stopProgressObservation()
                 return
             }
+            item = AVPlayerItem(url: playbackURL)
         }
-        let item = AVPlayerItem(url: playbackURL)
         loadItem(item)
         loadState = .readyToPlay
         updateNowPlaying()
@@ -515,12 +522,12 @@ final class PlayerStateManager {
             let kind: String = f.containsBothTracks ? "muxed" : (f.isVideoOnly ? "videoOnly" : (f.isAudioOnly ? "audioOnly" : "?"))
             log.info("  itag=\(f.id, privacy: .public) kind=\(kind, privacy: .public) h=\(f.height ?? -1, privacy: .public) mime=\(f.mimeType, privacy: .public) hasURL=\(hasURL, privacy: .public) hasN=\(hasN, privacy: .public)")
         }
-    }
+    
 
     /// Picks the highest-quality progressive (audio+video muxed) format within the user's
-    /// quality ceiling. AVPlayer can play these directly via `AVPlayerItem(url:)`; the audio-only
-    /// and video-only adaptive streams would need an AVMutableComposition setup, which we skip
-    /// here on purpose — this is the streaming-fallback path, not a full DASH player.
+        /// quality ceiling. AVPlayer can play these directly via `AVPlayerItem(url:)`; the audio-only
+    /// and video-only adaptive streams would need an AVMutableComposition setup, which the composite tier below handles
+    /// — this is the streaming-fallback path, not a full DASH player.
     private static func pickProgressiveURL(from formats: [VideoFormat], maxHeight: Int) -> URL? {
         formats
             .filter { $0.containsBothTracks && $0.url != nil }
@@ -530,7 +537,58 @@ final class PlayerStateManager {
             .url
     }
 
-    /// Fetches `MoreVideoInfosResponse` for the current video and appends the recommended videos to
+    /// Third streaming tier: stitch the best video-only + audio-only adaptive streams into an
+    /// `AVMutableComposition` and play that directly, with no download. This is the shape most
+    /// YouTube videos actually arrive in (the iOS client response lists separate streams; HLS
+    /// manifests and muxed progressive formats cover only a small subset), so this tier is what
+    /// makes stream-first work in practice. Returns nil when either side is missing or the
+    /// composition can't be built — the caller then falls back to the download path.
+    private func resolveCompositeItem(videoID: String, quality: VideoQuality) async -> AVPlayerItem? {
+        guard let info = try? await VideoService().fetchInfo(id: videoID) else { return nil }
+        let cap = quality.heightCap ?? .max
+        let videos = info.formats.filter { $0.isVideoOnly && $0.url != nil && ($0.height ?? .max) <= cap }
+        let audios = info.formats.filter { $0.isAudioOnly && $0.url != nil }
+        let video = videos.filter { $0.mimeType.contains("mp4") }.sorted { ($0.height ?? 0) > ($1.height ?? 0) }.first
+            ?? videos.sorted { ($0.height ?? 0) > ($1.height ?? 0) }.first
+        let audio = audios.filter { $0.mimeType.contains("mp4") }.sorted { ($0.bitrate ?? 0) > ($1.bitrate ?? 0) }.first
+            ?? audios.sorted { ($0.bitrate ?? 0) > ($1.bitrate ?? 0) }.first
+        guard let video, let videoURL = video.url, let audio, let audioURL = audio.url else {
+            log.info("composite: no video/audio pair for \(videoID, privacy: .public)")
+            return nil
+        }
+        log.info("composite: video h=\(video.height ?? -1, privacy: .public) mime=\(video.mimeType, privacy: .public) audio mime=\(audio.mimeType, privacy: .public) bitrate=\(audio.bitrate ?? -1, privacy: .public)")
+        do {
+            let videoAsset = AVURLAsset(url: videoURL)
+            let audioAsset = AVURLAsset(url: audioURL)
+            guard let videoTrack = try await videoAsset.loadTracks(withMediaType: .video).first,
+                  let audioTrack = try await audioAsset.loadTracks(withMediaType: .audio).first else {
+                log.info("composite: missing video or audio track for \(videoID, privacy: .public)")
+                return nil
+            }
+            let videoRange = videoTrack.timeRange
+            let audioRange = audioTrack.timeRange
+            let duration = CMTimeMinimum(videoRange.duration, audioRange.duration)
+            guard duration > .zero else {
+                log.info("composite: zero duration for \(videoID, privacy: .public)")
+                return nil
+            }
+            let composition = AVMutableComposition()
+            guard let compVideo = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+                  let compAudio = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                log.info("composite: failed to create composition tracks for \(videoID, privacy: .public)")
+                return nil
+            }
+            try compVideo.insertTimeRange(CMTimeRange(start: videoRange.start, duration: duration), of: videoTrack, at: .zero)
+            try compAudio.insertTimeRange(CMTimeRange(start: audioRange.start, duration: duration), of: audioTrack, at: .zero)
+            log.info("composite: built duration=\(duration.seconds, privacy: .public)s for \(videoID, privacy: .public)")
+            return AVPlayerItem(asset: composition)
+        } catch {
+            log.info("composite: build failed for \(videoID, privacy: .public): \(String(describing: error), privacy: .public)")
+            return nil
+        }
+    }
+
+        /// Fetches `MoreVideoInfosResponse` for the current video and appends the recommended videos to
     /// the queue. This is what makes the player behave like the YouTube app: tap any video and a
     /// fresh "up next" queue is ready to advance when the current track ends.
     private func fillQueueWithRecommendations(for seed: Video) async {
