@@ -522,6 +522,7 @@ final class PlayerStateManager {
             let kind: String = f.containsBothTracks ? "muxed" : (f.isVideoOnly ? "videoOnly" : (f.isAudioOnly ? "audioOnly" : "?"))
             log.info("  itag=\(f.id, privacy: .public) kind=\(kind, privacy: .public) h=\(f.height ?? -1, privacy: .public) mime=\(f.mimeType, privacy: .public) hasURL=\(hasURL, privacy: .public) hasN=\(hasN, privacy: .public)")
         }
+    }
     
 
     /// Picks the highest-quality progressive (audio+video muxed) format within the user's
